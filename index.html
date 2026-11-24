@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<title>Làng Trung Ý vs Làng Trung Thành - 3D RTS</title>
+<style>
+  body{margin:0;overflow:hidden;background:#87ceeb;font-family:'Segoe UI',sans-serif;user-select:none}
+  canvas{position:fixed;top:0;left:0;display:block}
+  #ui{position:absolute;top:15px;left:15px;color:#fff;z-index:10;background:rgba(15,23,42,.8);padding:15px 20px;border-radius:12px;border:1px solid rgba(255,255,255,.15);font-size:14px;line-height:1.8;min-width:290px;pointer-events:none}
+  .title{font-size:16px;font-weight:bold;color:#ffcc00;margin-bottom:4px}
+  .red{color:#ff5252;font-weight:bold}
+  .blue{color:#448aff;font-weight:bold}
+  .bar{height:6px;background:rgba(255,255,255,.15);border-radius:3px;margin-top:6px;overflow:hidden}
+  .fill{height:100%;background:linear-gradient(90deg,#69f0ae,#00bfa5);width:0%}
+  #minimap{position:absolute;bottom:20px;right:20px;width:180px;height:180px;border:2px solid rgba(255,255,255,.25);background:rgba(15,23,42,.85);z-index:10;border-radius:12px}
+  #winScreen{position:absolute;inset:0;background:rgba(10,10,25,.95);display:none;justify-content:center;align-items:center;flex-direction:column;z-index:100;color:#fff;text-align:center}
+  #winScreen h1{font-size:3.5rem;margin:0}
+  #winScreen button{margin-top:20px;padding:14px 40px;font-size:1.1rem;background:#ffcc00;border:none;border-radius:30px;cursor:pointer;font-weight:bold;color:#1a1a2e}
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div class="title">⚔️ CHIẾN TRƯỜNG TRUNG Ý</div>
+  <div>Phe: <span class="red">🔴 Làng Trung Ý (Bạn)</span> vs <span class="blue">🔵 Làng Trung Thành</span></div>
+  <div>Nhà chính: <span id="hpRed" class="red">100%</span> vs <span id="hpBlue" class="blue">100%</span></div>
+  <div>Lính: <span id="countRed">0</span> / 60 | Địch: <span id="countBlue">0</span></div>
+  <div style="font-size:12px;color:#cbd5e1;margin-top:4px">WASD/Mũi tên: Di chuyển cam | Lăn: Zoom<br>Click Trái: Chọn lính | Click Phải: Ra lệnh</div>
+  <div class="bar"><div id="spawnBar" class="fill"></div></div>
+</div>
+
+<canvas id="minimap" width="180" height="180"></canvas>
+<div id="winScreen"><h1 id="winText"></h1><p id="winSub"></p><button onclick="location.reload()">CHIẾN ĐẤU LẠI</button></div>
+
+<script src="https://cloudflare.com"></script>
+<script src="https://jsdelivr.net"></script>
+
+<script>
+window.addEventListener('DOMContentLoaded', () => {
+  const CONFIG = { MAP_SIZE: 140, UNIT_CAP: 60, SPAWN_INTERVAL: 3.0, UNIT_SPEED: 6.5, ATTACK_RANGE: 4.5, ATTACK_DMG: 12, ATTACK_SPEED: 1.0, UNIT_HP: 60, BASE_HP: 800 };
+
+  const canvas = document.createElement('canvas');
+  document.body.appendChild(canvas);
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  scene.fog = new THREE.FogExp2(0x87ceeb, 0.008);
+
+  const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 65, 55);
+
+  const controls = new THREE.OrbitControls(camera, canvas);
+  controls.maxPolarAngle = Math.PI / 2 - 0.08;
+  controls.minDistance = 20;
+  controls.maxDistance = 110;
+  controls.mouseButtons = { LEFT: null, MIDDLE: THREE.MOUSE.ROTATE, RIGHT: null };
+  controls.update();
+
+  const sunLight = new THREE.DirectionalLight(0xfff5d6, 1.2);
+  sunLight.position.set(50, 80, 30);
+  scene.add(sunLight, new THREE.AmbientLight(0x606060, 0.8), new THREE.HemisphereLight(0x87ceeb, 0x3a7d2b, 0.6));
+
+  const Mat = {
+    ground: new THREE.MeshStandardMaterial({ color: 0x38661d, roughness: 0.9 }),
+    river: new THREE.MeshStandardMaterial({ color: 0x0288d1, transparent: true, opacity: 0.85 }),
+    bridge: new THREE.MeshStandardMaterial({ color: 0x8d6e63 }),
+    baseRed: new THREE.MeshStandardMaterial({ color: 0xd32f2f }),
+    baseBlue: new THREE.MeshStandardMaterial({ color: 0x1976d2 }),
+    unitRed: new THREE.MeshStandardMaterial({ color: 0xff5252 }),
+    unitBlue: new THREE.MeshStandardMaterial({ color: 0x448aff }),
+    ring: new THREE.MeshBasicMaterial({ color: 0xffeb3b, side: THREE.DoubleSide }),
+    laserRed: new THREE.LineBasicMaterial({ color: 0xffeb3b }),
+    laserBlue: new THREE.LineBasicMaterial({ color: 0x00e5ff })
+  };
+
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(CONFIG.MAP_SIZE, CONFIG.MAP_SIZE), Mat.ground);
+  ground.rotation.x = -Math.PI / 2;
+  scene.add(ground);
+
+  const river = new THREE.Mesh(new THREE.PlaneGeometry(CONFIG.MAP_SIZE, 10), Mat.river);
+  river.rotation.x = -Math.PI / 2;
+  river.position.y = 0.05;
+  scene.add(river);
+
+  [-28, 28].forEach(x => {
+    const bridge = new THREE.Mesh(new THREE.BoxGeometry(14, 0.4, 12), Mat.bridge);
+    bridge.position.set(x, 0.2, 0);
+    scene.add(bridge);
+  });
+
+  const bases = {
+    red: { hp: CONFIG.BASE_HP, pos: new THREE.Vector3(0, 0, -52) },
+    blue: { hp: CONFIG.BASE_HP, pos: new THREE.Vector3(0, 0, 52) }
+  };
+
+  function createBase(baseObj, mat) {
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(12, 8, 12), mat);
+    body.position.y = 4;
+    const roof = new THREE.Mesh(new THREE.ConeGeometry(9.5, 5, 4), mat);
+    roof.position.y = 10.5;
+    roof.rotation.y = Math.PI / 4;
+    group.add(body, roof);
+    group.position.copy(baseObj.pos);
+    scene.add(group);
+  }
+  createBase(bases.red, Mat.baseRed);
+  createBase(bases.blue, Mat.baseBlue);
+  const units = [], lasers = [], keys = {};
+  let spawnTimer = 0, gameOver = false;
+  const unitGeo = new THREE.CylinderGeometry(0.7, 0.9, 2.2, 8);
+  const headGeo = new THREE.SphereGeometry(0.55, 8, 8);
+  const ringGeo = new THREE.RingGeometry(1.1, 1.4, 16);
+
+  function spawnUnit(team) {
+    if (units.filter(u => u.team === team).length >= CONFIG.UNIT_CAP) return;
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(unitGeo, team === 'red' ? Mat.unitRed : Mat.unitBlue);
+    body.position.y = 1.1;
+    const head = new THREE.Mesh(headGeo, team === 'red' ? Mat.unitRed : Mat.unitBlue);
+    head.position.y = 2.6;
+    const ring = new THREE.Mesh(ringGeo, Mat.ring);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.08;
+    ring.visible = false;
+
+    group.add(body, head, ring);
+    group.position.set(bases[team].pos.x + (Math.random() - 0.5) * 18, 0, bases[team].pos.z + (team === 'red' ? 9 : -9));
+    scene.add(group);
+    units.push({ team, mesh: group, ring, hp: CONFIG.UNIT_HP, selected: false, targetPos: null, cooldown: 0 });
+  }
+
+  for (let i = 0; i < 6; i++) { spawnUnit('red'); spawnUnit('blue'); }
+
+  const raycaster = new THREE.Raycaster(), mouse = new THREE.Vector2();
+  window.addEventListener('keydown', e => keys[e.code] = true);
+  window.addEventListener('keyup', e => keys[e.code] = false);
+  window.addEventListener('contextmenu', e => e.preventDefault());
+
+  canvas.addEventListener('pointerdown', e => {
+    if (gameOver) return;
+    mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    raycaster.setFromCamera(mouse, camera);
+    const hits = raycaster.intersectObject(ground);
+    if (!hits.length) return;
+    const pt = hits.point;
+
+    if (e.button === 0) {
+      let picked = false;
+      units.forEach(u => {
+        if (u.team === 'red') {
+          u.selected = u.mesh.position.distanceTo(pt) < 8;
+          u.ring.visible = u.selected;
+          if (u.selected) picked = true;
+        }
+      });
+      if (!picked) units.forEach(u => { u.selected = false; u.ring.visible = false; });
+    } else if (e.button === 2) {
+      const sel = units.filter(u => u.team === 'red' && u.selected);
+      (sel.length ? sel : units.filter(u => u.team === 'red')).forEach(u => {
+        u.targetPos = new THREE.Vector3(pt.x + (Math.random() - 0.5) * 6, 0, pt.z + (Math.random() - 0.5) * 6);
+      });
+    }
+  });
+
+  function shootLaser(from, to, team) {
+    const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(from.x, 1.8, from.z), new THREE.Vector3(to.x, 1.8, to.z)]);
+    const line = new THREE.Line(geo, team === 'red' ? Mat.laserRed : Mat.laserBlue);
+    scene.add(line);
+    lasers.push({ line, life: 0.12 });
+  }
+
+  const miniCtx = document.getElementById('minimap').getContext('2d');
+  const clock = new THREE.Clock();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(clock.getDelta(), 0.1);
+
+    if (!gameOver) {
+      const camSpeed = 40 * dt;
+      if (keys['KeyW'] || keys['ArrowUp']) { camera.position.z -= camSpeed; controls.target.z -= camSpeed; }
+      if (keys['KeyS'] || keys['ArrowDown']) { camera.position.z += camSpeed; controls.target.z += camSpeed; }
+      if (keys['KeyA'] || keys['ArrowLeft']) { camera.position.x -= camSpeed; controls.target.x -= camSpeed; }
+      if (keys['KeyD'] || keys['ArrowRight']) { camera.position.x += camSpeed; controls.target.x += camSpeed; }
+
+      spawnTimer += dt;
+      document.getElementById('spawnBar').style.width = ((spawnTimer / CONFIG.SPAWN_INTERVAL) * 100) + '%';
+      if (spawnTimer >= CONFIG.SPAWN_INTERVAL) { spawnTimer = 0; spawnUnit('red'); spawnUnit('blue'); }
+
+      for (let i = units.length - 1; i >= 0; i--) {
+        const u = units[i];
+        u.cooldown = Math.max(0, u.cooldown - dt);
+        const enemyTeam = u.team === 'red' ? 'blue' : 'red';
+        const enemyBase = bases[enemyTeam];
+        let nearest = null, minD = Infinity;
+
+        for (let j = 0; j < units.length; j++) {
+          if (units[j].team === enemyTeam) {
+            const d = u.mesh.position.distanceTo(units[j].mesh.position);
+            if (d < minD) { minD = d; nearest = units[j]; }
+          }
+        }
+
+        const distBase = u.mesh.position.distanceTo(enemyBase.pos);
+        if (nearest && minD <= CONFIG.ATTACK_RANGE) {
+          u.mesh.lookAt(nearest.mesh.position);
+          if (u.cooldown <= 0) { u.cooldown = CONFIG.ATTACK_SPEED; nearest.hp -= CONFIG.ATTACK_DMG; shootLaser(u.mesh.position, nearest.mesh.position, u.team); }
+        } else if (distBase <= CONFIG.ATTACK_RANGE + 5) {
+          u.mesh.lookAt(enemyBase.pos);
+          if (u.cooldown <= 0) { u.cooldown = CONFIG.ATTACK_SPEED; enemyBase.hp = Math.max(0, enemyBase.hp - CONFIG.ATTACK_DMG); shootLaser(u.mesh.position, enemyBase.pos, u.team); }
+        } else {
+          const dest = u.targetPos || (nearest && minD < 22 ? nearest.mesh.position : enemyBase.pos);
+          const dir = new THREE.Vector3().subVectors(dest, u.mesh.position);
+          dir.y = 0;
+          if (dir.length() > 0.8) {
+            dir.normalize();
+            u.mesh.position.addScaledVector(dir, CONFIG.UNIT_SPEED * dt);
+            u.mesh.lookAt(u.mesh.position.clone().add(dir));
+          } else if (u.targetPos) {
+            u.targetPos = null;
+          }
+        }
+      }
+
+      for (let i = units.length - 1; i >= 0; i--) {
+        if (units[i].hp <= 0) { scene.remove(units[i].mesh); units.splice(i, 1); }
+      }
+
+      document.getElementById('hpRed').textContent = Math.ceil((bases.red.hp / CONFIG.BASE_HP) * 100) + '%';
+      document.getElementById('hpBlue').textContent = Math.ceil((bases.blue.hp / CONFIG.BASE_HP) * 100) + '%';
+      document.getElementById('countRed').textContent = units.filter(u => u.team === 'red').length;
+      document.getElementById('countBlue').textContent = units.filter(u => u.team === 'blue').length;
+
+      if (bases.blue.hp <= 0 || bases.red.hp <= 0) {
+        gameOver = true;
+        document.getElementById('winScreen').style.display = 'flex';
+        const win = bases.blue.hp <= 0;
+        document.getElementById('winText').textContent = win ? 'CHIẾN THẮNG!' : 'THẤT BẠI!';
+        document.getElementById('winText').style.color = win ? '#ffcc00' : '#ff5252';
+        document.getElementById('winSub').textContent = win ? 'Làng Trung Ý đã đánh bại Làng Trung Thành!' : 'Nhà chính Làng Trung Ý đã sập!';
+      }
+    }
+
+    for (let i = lasers.length - 1; i >= 0; i--) {
+      lasers[i].life -= dt;
+      if (lasers[i].life <= 0) { scene.remove(lasers[i].line); lasers[i].line.geometry.dispose(); lasers.splice(i, 1); }
+    }
+
+    miniCtx.clearRect(0, 0, 180, 180);
+    miniCtx.fillStyle = '#0288d1'; miniCtx.fillRect(0, 84, 180, 12);
+    const toMini = v => ((v + CONFIG.MAP_SIZE / 2) / CONFIG.MAP_SIZE) * 180;
+    miniCtx.fillStyle = '#ff5252'; miniCtx.fillRect(toMini(bases.red.pos.x) - 6, toMini(bases.red.pos.z) - 6, 12, 12);
+    miniCtx.fillStyle = '#448aff'; miniCtx.fillRect(toMini(bases.blue.pos.x) - 6, toMini(bases.blue.pos.z) - 6, 12, 12);
+    units.forEach(u => { miniCtx.fillStyle = u.team === 'red' ? '#ff8a80' : '#82b1ff'; miniCtx.beginPath(); miniCtx.arc(toMini(u.mesh.position.x), toMini(u.mesh.position.z), 2.5, 0, Math.PI * 2); miniCtx.fill(); });
+
+    renderer.render(scene, camera);
+  }
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  animate();
+});
+</script>
+</body>
+</html>
